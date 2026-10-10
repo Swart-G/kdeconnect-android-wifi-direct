@@ -29,7 +29,6 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import org.kde.kdeconnect.backends.BaseLinkProvider
 import org.kde.kdeconnect.backends.BaseLinkProvider.ConnectionReceiver
-import org.kde.kdeconnect.backends.bluetooth.BluetoothLinkProvider
 import org.kde.kdeconnect.backends.lan.LanLinkProvider
 import org.kde.kdeconnect.helpers.NotificationHelper
 import org.kde.kdeconnect.plugins.clipboard.ClipboardFloatingActivity
@@ -50,6 +49,8 @@ import org.kde.kdeconnect_tp.R
 class BackgroundService : Service() {
     private lateinit var applicationInstance: KdeConnect
 
+    val wifiDirectManager by lazy { org.kde.kdeconnect.helpers.WifiDirectManager(this) }
+
     private val linkProviders = mutableListOf<BaseLinkProvider>()
 
     /** Indicates whether device is connected over wifi / usb / bluetooth / (anything other than cellular) */
@@ -67,7 +68,6 @@ class BackgroundService : Service() {
     private fun registerLinkProviders() {
         linkProviders.add(LanLinkProvider(this))
         //linkProviders.add(LoopbackLinkProvider(this))
-        linkProviders.add(BluetoothLinkProvider(this))
     }
 
     fun onNetworkChange(network: Network?) {
@@ -137,6 +137,7 @@ class BackgroundService : Service() {
             linkProvider.onStart()
         }
         initialized = true
+        wifiDirectManager
     }
 
     fun changePersistentNotificationVisibility(visible: Boolean) {
@@ -225,6 +226,8 @@ class BackgroundService : Service() {
     override fun onDestroy() {
         Log.d("KdeConnect/BgService", "onDestroy")
         initialized = false
+        wifiDirectManager.close()
+        instance = null
         for (linkProvider in linkProviders) {
             linkProvider.onStop()
         }

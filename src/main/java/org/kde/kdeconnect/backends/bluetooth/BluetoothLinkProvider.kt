@@ -26,6 +26,7 @@ import org.kde.kdeconnect.backends.BaseLinkProvider
 import org.kde.kdeconnect.Device
 import org.kde.kdeconnect.DeviceInfo
 import org.kde.kdeconnect.DeviceInfo.Companion.fromIdentityPacketAndCert
+import org.kde.kdeconnect.helpers.WifiDirectManager
 import org.kde.kdeconnect.helpers.DeviceHelper
 import org.kde.kdeconnect.helpers.security.SslHelper
 import org.kde.kdeconnect.helpers.ThreadHelper.execute
@@ -122,7 +123,7 @@ class BluetoothLinkProvider(private val context: Context) : BaseLinkProvider() {
     }
 
     private inner class ServerRunnable : Runnable {
-        private var continueProcessing = true
+        @Volatile private var continueProcessing = true
         private var serverSocket: BluetoothServerSocket? = null
         fun stopProcessing() {
             continueProcessing = false
@@ -178,8 +179,10 @@ class BluetoothLinkProvider(private val context: Context) : BaseLinkProvider() {
                 synchronized(sockets) { sockets.remove(socket.remoteDevice) }
                 throw e
             }
+            val connection = ConnectionMultiplexer(socket)
+            var handedOver = false
             try {
-                ConnectionMultiplexer(socket).use { connection ->
+                run {
                     val outputStream = connection.defaultOutputStream
                     val inputStream = connection.defaultInputStream
 
@@ -223,6 +226,7 @@ class BluetoothLinkProvider(private val context: Context) : BaseLinkProvider() {
                             deviceInfo, this@BluetoothLinkProvider)
                     Log.i("BTLinkProvider/Server", "About to addLink")
                     addLink(identityPacket, link)
+                    handedOver = true
                     Log.i("BTLinkProvider/Server", "Link Added")
                 }
             } catch (e: Exception) {
@@ -231,6 +235,8 @@ class BluetoothLinkProvider(private val context: Context) : BaseLinkProvider() {
                     Log.i("BTLinkProvider/Server", "Exception thrown, removing socket", e)
                 }
                 throw e
+            } finally {
+                if (!handedOver) connection.close()
             }
         }
     }
@@ -240,7 +246,7 @@ class BluetoothLinkProvider(private val context: Context) : BaseLinkProvider() {
     }
 
     private inner class ClientRunnable : BroadcastReceiver(), Runnable {
-        private var continueProcessing = true
+        @Volatile private var continueProcessing = true
         fun stopProcessing() {
             continueProcessing = false
         }
@@ -251,14 +257,15 @@ class BluetoothLinkProvider(private val context: Context) : BaseLinkProvider() {
                 val filter = IntentFilter(BluetoothDevice.ACTION_UUID)
                 context.registerReceiver(this, filter)
                 Log.i("ClientRunnable", "receiver registered")
-                if (continueProcessing) {
+                while (continueProcessing) {
                     Log.i("ClientRunnable", "before connectToDevices")
                     discoverDeviceServices()
                     Log.i("ClientRunnable", "after connectToDevices")
                     try {
-                        Thread.sleep(15000)
+                        Thread.sleep(30000)
                     } catch (ignored: InterruptedException) {
                     }
+                    if (!PreferenceManager.getDefaultSharedPreferences(context).getBoolean(WifiDirectManager.KEY_ENABLED, false)) break
                 }
                 Log.i("ClientRunnable", "unregisteringReceiver")
                 context.unregisterReceiver(this)
@@ -373,7 +380,7 @@ class BluetoothLinkProvider(private val context: Context) : BaseLinkProvider() {
                 }
                 Log.i("BTLinkProvider/Client", "Device: " + device.address + " Before sb.toString()")
                 val message = sb.toString()
-                Log.i("BTLinkProvider/Client", "Device: " + device.address + " Before unserialize (message: '" + message + "')")
+                Log.i("BTLinkProvider/Client", "Device: " + device.address + " Before unserialize")
                 val identityPacket = NetworkPacket.unserialize(message)
                 Log.i("BTLinkProvider/Client", "Device: " + device.address + " After unserialize")
 

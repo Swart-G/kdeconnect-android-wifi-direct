@@ -51,7 +51,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 class Device : PacketReceiver {
 
-    data class NetworkPacketWithCallback(val np : NetworkPacket, val callback: SendPacketStatusCallback)
+    data class NetworkPacketWithCallback(val np : NetworkPacket, val callback: SendPacketStatusCallback, val providerName: String? = null)
 
     val context: Context
 
@@ -320,8 +320,8 @@ class Device : PacketReceiver {
         synchronized(sendChannel) {
             if (sendCoroutine == null) {
                 sendCoroutine = CoroutineScope(Dispatchers.IO).launch {
-                    for ((np, callback) in sendChannel) {
-                        sendPacketBlocking(np, callback)
+                    for ((np, callback, providerName) in sendChannel) {
+                        sendPacketBlocking(np, callback, false, providerName)
                     }
                 }
             }
@@ -490,6 +490,10 @@ class Device : PacketReceiver {
     @AnyThread
     fun sendPacket(np: NetworkPacket) = sendPacket(np, defaultCallback)
 
+    fun sendPacketViaProvider(np: NetworkPacket, providerName: String) {
+        sendChannel.trySend(NetworkPacketWithCallback(np, defaultCallback, providerName))
+    }
+
     @WorkerThread
     fun sendPacketBlocking(np: NetworkPacket, callback: SendPacketStatusCallback): Boolean =
         sendPacketBlocking(np, callback, false)
@@ -509,17 +513,19 @@ class Device : PacketReceiver {
      * @see BaseLink.sendPacket
      */
     @WorkerThread
+    @JvmOverloads
     fun sendPacketBlocking(
         np: NetworkPacket,
         callback: SendPacketStatusCallback,
-        sendPayloadFromSameThread: Boolean
+        sendPayloadFromSameThread: Boolean,
+        providerName: String? = null
     ): Boolean {
         if (!supportsPacketType(np.type)) {
             Log.e("KDE/sendPacket", "Tried to send an unsupported packet type ${np.type} to: ${deviceInfo.name}")
             return false
         }
 
-        val success = links.any { link ->
+        val success = links.filter { providerName == null || it.linkProvider.name == providerName }.any { link ->
             try {
                 link.sendPacket(np, callback, sendPayloadFromSameThread)
             } catch (e: IOException) {

@@ -299,6 +299,10 @@ class MainActivity : AppCompatActivity(), OnSharedPreferenceChangeListener {
         val addDeviceItem = devicesMenu.add(Menu.FIRST, MENU_ENTRY_ADD_DEVICE, 1000, R.string.pair_new_device)
         addDeviceItem.setIcon(R.drawable.ic_action_content_add_circle_outline_32dp)
         addDeviceItem.isCheckable = true
+        menu.add(R.string.nearby_title).setOnMenuItemClickListener {
+            startActivity(Intent(this, NearbyConnectionActivity::class.java))
+            true
+        }
         val settingsItem = menu.add(Menu.FIRST, MENU_ENTRY_SETTINGS, 1000, R.string.settings)
         settingsItem.setIcon(R.drawable.ic_settings_white_32dp)
         settingsItem.isCheckable = true
@@ -387,14 +391,6 @@ class MainActivity : AppCompatActivity(), OnSharedPreferenceChangeListener {
                 // To get a writeable path manually on Android 10 and later for Share and Receive Plugin.
                 // Otherwise, Receiving files will keep failing until the user chooses a path manually to receive files.
                 openDocumentTreeLauncher.launch(null)
-            }
-
-            if (isPermissionGranted(permissions, grantResults, Manifest.permission.BLUETOOTH_CONNECT) &&
-                isPermissionGranted(permissions, grantResults, Manifest.permission.BLUETOOTH_SCAN)) {
-                PreferenceManager.getDefaultSharedPreferences(this).edit {
-                    putBoolean(SettingsFragment.KEY_BLUETOOTH_ENABLED, true)
-                }
-                setContentFragment(SettingsFragment())
             }
 
             if (
