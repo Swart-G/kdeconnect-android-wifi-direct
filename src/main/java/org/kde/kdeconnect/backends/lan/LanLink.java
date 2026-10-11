@@ -63,6 +63,8 @@ public class LanLink extends BaseLink {
         }
     }
 
+    public java.net.InetAddress getLocalAddress() { return socket.getLocalAddress(); }
+
     //Returns the old socket
     @WorkerThread
     public SSLSocket reset(final SSLSocket newSocket, final DeviceInfo deviceInfo) throws IOException {
@@ -146,7 +148,7 @@ public class LanLink extends BaseLink {
             //Prepare socket for the payload
             final ServerSocket server;
             if (np.hasPayload()) {
-                server = LanLinkProvider.openServerSocketOnFreePort(LanLinkProvider.PAYLOAD_TRANSFER_MIN_PORT);
+                server = LanLinkProvider.openServerSocketOnFreePort(LanLinkProvider.PAYLOAD_TRANSFER_MIN_PORT, socket.getLocalAddress());
                 JSONObject payloadTransferInfo = new JSONObject();
                 payloadTransferInfo.put("port", server.getLocalPort());
                 np.setPayloadTransferInfo(payloadTransferInfo);
@@ -264,6 +266,7 @@ public class LanLink extends BaseLink {
             try {
                 int tcpPort = np.getPayloadTransferInfo().getInt("port");
                 InetSocketAddress deviceAddress = (InetSocketAddress) socket.getRemoteSocketAddress();
+                payloadSocket.bind(new InetSocketAddress(socket.getLocalAddress(), 0));
                 payloadSocket.connect(new InetSocketAddress(deviceAddress.getAddress(), tcpPort));
                 payloadSocket = SslHelper.convertToSslSocket(context, payloadSocket, getDeviceId(), true, true);
                 np.setPayload(new NetworkPacket.Payload(payloadSocket, np.getPayloadSize()));

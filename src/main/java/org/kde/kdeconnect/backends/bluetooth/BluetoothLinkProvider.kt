@@ -26,7 +26,6 @@ import org.kde.kdeconnect.backends.BaseLinkProvider
 import org.kde.kdeconnect.Device
 import org.kde.kdeconnect.DeviceInfo
 import org.kde.kdeconnect.DeviceInfo.Companion.fromIdentityPacketAndCert
-import org.kde.kdeconnect.helpers.WifiDirectManager
 import org.kde.kdeconnect.helpers.DeviceHelper
 import org.kde.kdeconnect.helpers.security.SslHelper
 import org.kde.kdeconnect.helpers.ThreadHelper.execute
@@ -265,7 +264,7 @@ class BluetoothLinkProvider(private val context: Context) : BaseLinkProvider() {
                         Thread.sleep(30000)
                     } catch (ignored: InterruptedException) {
                     }
-                    if (!PreferenceManager.getDefaultSharedPreferences(context).getBoolean(WifiDirectManager.KEY_ENABLED, false)) break
+                    break
                 }
                 Log.i("ClientRunnable", "unregisteringReceiver")
                 context.unregisterReceiver(this)

@@ -81,6 +81,10 @@ class BackgroundService : Service() {
         }
     }
 
+    fun onWifiDirectEnded() {
+        for (provider in linkProviders) if (provider is LanLinkProvider) provider.onWifiDirectEnded()
+    }
+
     fun addConnectionListener(connectionReceiver: ConnectionReceiver) {
         for (linkProvider in linkProviders) {
             linkProvider.addConnectionReceiver(connectionReceiver)

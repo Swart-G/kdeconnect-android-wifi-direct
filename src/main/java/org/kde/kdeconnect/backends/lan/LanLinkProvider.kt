@@ -14,6 +14,7 @@ import android.util.Log
 import androidx.annotation.WorkerThread
 import androidx.core.content.ContextCompat
 import org.json.JSONException
+import org.kde.kdeconnect.BackgroundService
 import org.kde.kdeconnect.DeviceHost
 import org.kde.kdeconnect.DeviceInfo
 import org.kde.kdeconnect.DeviceInfo.Companion.fromIdentityPacketAndCert
@@ -54,6 +55,8 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
 
     private val visibleDevices = ConcurrentHashMap<String, LanLink>() // Links by device id
 
+    private val directLinks = ConcurrentHashMap<String, Int>()
+
     private val mdnsDiscovery = MdnsDiscovery(context, this)
 
     private val lastConnectionTimeByDeviceId = ConcurrentHashMap<String, Long>()
@@ -76,11 +79,39 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
         val deviceId = link.deviceId
         // Do not let an old connection remove its replacement.
         if (visibleDevices.remove(deviceId, link)) {
+            val token = directLinks.remove(deviceId)
+            if (token != null) (context as? BackgroundService)?.wifiDirectManager?.onLinkLost(deviceId, token)
             super.onConnectionLost(link)
         }
     }
 
-    fun unserializeReceivedIdentityPacket(message: String): Pair<NetworkPacket, Boolean>? {
+    @Synchronized
+    fun onWifiDirectEnded() {
+        val ids = directLinks.keys.toList()
+        directLinks.clear()
+        for (id in ids) {
+            val link = visibleDevices.remove(id) ?: continue
+            link.disconnect()
+            super.onConnectionLost(link)
+        }
+        lastBroadcast = 0
+        onNetworkChange(null)
+    }
+
+    fun unserializeReceivedIdentityPacket(message: String, localAddress: InetAddress? = null): Pair<NetworkPacket, Boolean>? {
+        val identity = parseReceivedIdentityPacket(message) ?: return null
+        return if (isTrustedConnection(identity.second, localAddress)) identity else null
+    }
+
+    private fun isTrustedConnection(deviceTrusted: Boolean, localAddress: InetAddress?): Boolean {
+        if (localAddress != null && (context as? BackgroundService)?.wifiDirectManager?.canUseLocalAddress(localAddress) == false) return false
+        if (deviceTrusted || TrustedNetworkHelper.isTrustedNetwork(context)) return true
+        if (localAddress != null && (context as? BackgroundService)?.wifiDirectManager?.isGroupAddress(localAddress) == true) return true
+        Log.i("KDE/LanLinkProvider", "Ignoring identity packet because the device and network are not trusted.")
+        return false
+    }
+
+    private fun parseReceivedIdentityPacket(message: String): Pair<NetworkPacket, Boolean>? {
         val identityPacket: NetworkPacket?
         try {
             identityPacket = unserialize(message)
@@ -107,10 +138,6 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
         }
 
         val deviceTrusted = TrustedDevices.isTrustedDevice(context, deviceId)
-        if (!deviceTrusted && !TrustedNetworkHelper.isTrustedNetwork(context)) {
-            Log.i("KDE/LanLinkProvider", "Ignoring identity packet because the device is not trusted and I'm not on a trusted network.")
-            return null
-        }
 
         return Pair(identityPacket, deviceTrusted)
     }
@@ -118,7 +145,7 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
     // They received my UDP broadcast and are connecting to me. The first thing they send should be their identity packet.
     @WorkerThread
     @Throws(IOException::class, CertificateException::class)
-    private fun tcpPacketReceived(socket: Socket) {
+    private fun tcpPacketReceived(socket: Socket, p2pGeneration: Int?) {
         val address = socket.getInetAddress()
 
         if (!isPrivateAddress(address)) {
@@ -146,7 +173,7 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
             return
         }
 
-        val (identityPacket, deviceTrusted)  = unserializeReceivedIdentityPacket(message) ?: run {
+        val (identityPacket, deviceTrusted)  = unserializeReceivedIdentityPacket(message, socket.localAddress) ?: run {
             socket.closeSafe()
             return
         }
@@ -166,7 +193,7 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
             return
         }
 
-        identityPacketReceived(identityPacket, socket, ConnectionStarted.Locally, deviceTrusted)
+        identityPacketReceived(identityPacket, socket, ConnectionStarted.Locally, deviceTrusted, p2pGeneration)
     }
 
     fun rateLimitByIp(address: InetAddress): Boolean {
@@ -210,10 +237,13 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
             return
         }
 
-        val message = String(packet.data, Charsets.UTF_8)
+        val message = String(packet.data, packet.offset, packet.length, Charsets.UTF_8)
 
-        val (identityPacket, deviceTrusted) = unserializeReceivedIdentityPacket(message)
+        val (identityPacket, deviceTrusted) = parseReceivedIdentityPacket(message)
             ?: return
+
+        if (!deviceTrusted && !TrustedNetworkHelper.isTrustedNetwork(context)
+            && (context as? BackgroundService)?.wifiDirectManager?.groupInterface == null) return
 
         Log.i("KDE/LanLinkProvider", "Broadcast identity packet received from ${identityPacket.getString("deviceName")}")
 
@@ -225,7 +255,14 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
 
         var socket: Socket? = null
         try {
-            socket = SocketFactory.getDefault().createSocket(address, tcpPort)
+            val direct = (context as? BackgroundService)?.wifiDirectManager
+            val source = direct?.sourceAddress(address)
+            val p2pGeneration = if (source != null) direct.sessionGeneration else null
+            socket = SocketFactory.getDefault().createSocket()
+            if (source != null) socket.bind(InetSocketAddress(source, 0))
+            socket.connect(InetSocketAddress(address, tcpPort), 10000)
+            // UDP does not expose the receiving interface; check the TCP route before sending our identity.
+            if (!isTrustedConnection(deviceTrusted, socket.localAddress)) return
             configureSocket(socket)
 
             val myDeviceInfo = DeviceHelper.getDeviceInfo(context)
@@ -237,7 +274,7 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
             out.write(myIdentity.serialize().toByteArray())
             out.flush()
 
-            identityPacketReceived(identityPacket, socket, ConnectionStarted.Remotely, deviceTrusted)
+            identityPacketReceived(identityPacket, socket, ConnectionStarted.Remotely, deviceTrusted, p2pGeneration)
             socket = null // The SSL socket now owns the underlying socket, or it was rejected and closed.
         } catch (e: IOException) {
             Log.e("LanLinkProvider", "Exception receiving incoming UDP connection", e)
@@ -275,8 +312,10 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
         identityPacket: NetworkPacket,
         socket: Socket,
         connectionStarted: ConnectionStarted,
-        deviceTrusted: Boolean
+        deviceTrusted: Boolean,
+        p2pGeneration: Int?
     ) {
+        val directToken = p2pGeneration
         val deviceId = identityPacket.getString("deviceId")
         val protocolVersion = identityPacket.getInt("protocolVersion")
 
@@ -342,7 +381,7 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
                     val certificate = event.peerCertificates[0]
                     val deviceInfo = fromIdentityPacketAndCert(secureIdentityPacket, certificate)
                     Log.i("KDE/LanLinkProvider", "Handshake as $mode successful with ${deviceInfo.name} secured with ${event.cipherSuite}")
-                    addOrUpdateLink(sslSocket, deviceInfo)
+                    addOrUpdateLink(sslSocket, deviceInfo, directToken)
                 } catch (e: JSONException) {
                     Log.e("KDE/LanLinkProvider", "Remote device doesn't correctly implement protocol version 8", e)
                     try { sslSocket.close() } catch (_: IOException) { }
@@ -374,7 +413,15 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
     @WorkerThread
     @Throws(IOException::class)
     @Synchronized
-    private fun addOrUpdateLink(socket: SSLSocket, deviceInfo: DeviceInfo) {
+    private fun addOrUpdateLink(socket: SSLSocket, deviceInfo: DeviceInfo, directToken: Int?) {
+        val direct = (context as? BackgroundService)?.wifiDirectManager
+        if (direct?.canUseLocalAddress(socket.localAddress) == false) { socket.closeSafe(); return }
+        if (directToken != null && directLinks.keys.any { it != deviceInfo.id }) { socket.closeSafe(); return }
+        if (directToken != null && (direct?.sessionGeneration != directToken || !direct.isGroupAddress(socket.localAddress)
+                    || (direct.authenticatedId != null && direct.authenticatedId != deviceInfo.id))) {
+            socket.closeSafe()
+            return
+        }
         var linkCreated = false
         val link = visibleDevices.computeIfAbsent(deviceInfo.id) {
             linkCreated = true
@@ -391,9 +438,17 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
                 socket.closeSafe()
                 return
             }
+            if (directLinks.containsKey(deviceInfo.id) && directToken == null) {
+                socket.closeSafe()
+                return
+            }
             Log.d("KDE/LanLinkProvider", "Reusing same link for device " + deviceInfo.id)
             link.reset(socket, deviceInfo)
             onDeviceInfoUpdated(deviceInfo)
+        }
+        if (directToken != null) {
+            directLinks[deviceInfo.id] = directToken
+            direct?.onAuthenticated(deviceInfo.id, directToken)
         }
     }
 
@@ -453,9 +508,11 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
                 try {
                     val socket = newTcpServer.accept()
                     configureSocket(socket)
+                    val direct = (context as? BackgroundService)?.wifiDirectManager
+                    val p2pGeneration = if (direct?.isGroupAddress(socket.localAddress) == true) direct.sessionGeneration else null
                     ThreadHelper.execute {
                         try {
-                            tcpPacketReceived(socket)
+                            tcpPacketReceived(socket, p2pGeneration)
                         } catch (e: IOException) {
                             try { socket.close() } catch (_: IOException) {}
                             Log.e("LanLinkProvider", "Exception receiving incoming TCP connection", e)
@@ -498,11 +555,18 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
             if (ipList.isNotEmpty()) {
                 sendUdpIdentityPacket(ipList, network)
             }
+            val directInterface = (context as? BackgroundService)?.wifiDirectManager?.groupInterface
+            for (address in directInterface?.interfaceAddresses.orEmpty()) {
+                val broadcast = address.broadcast ?: continue
+                val owner = (context as? BackgroundService)?.wifiDirectManager?.groupOwnerAddress
+                val destinations = if (owner != null && owner != address.address) listOf(broadcast, owner) else listOf(broadcast)
+                sendUdpIdentityPacket(destinations, null, address.address)
+            }
         }
     }
 
     @WorkerThread
-    fun sendUdpIdentityPacket(ipList: List<InetAddress>, network: Network?) {
+    fun sendUdpIdentityPacket(ipList: List<InetAddress>, network: Network?, localAddress: InetAddress? = null) {
         val tcpServer = tcpServer
         if (tcpServer?.isBound != true) {
             Log.i("LanLinkProvider", "Won't broadcast UDP packet if TCP socket is not ready yet")
@@ -525,7 +589,7 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
 
         val socket: DatagramSocket?
         try {
-            socket = DatagramSocket()
+            socket = if (localAddress == null) DatagramSocket() else DatagramSocket(InetSocketAddress(localAddress, 0))
             if (network != null) {
                 try {
                     network.bindSocket(socket)
@@ -629,12 +693,13 @@ class LanLinkProvider(private val context: Context) : BaseLinkProvider() {
         private const val DELAY_BETWEEN_BROADCASTS: Long = 200
 
         @JvmStatic
+        @JvmOverloads
         @Throws(IOException::class)
-        fun openServerSocketOnFreePort(minPort: Int): ServerSocket {
+        fun openServerSocketOnFreePort(minPort: Int, localAddress: InetAddress? = null): ServerSocket {
             var tcpPort = minPort
             while (tcpPort <= MAX_PORT) {
                 try {
-                    val candidateServer = ServerSocket(tcpPort)
+                    val candidateServer = ServerSocket().apply { bind(InetSocketAddress(localAddress, tcpPort)) }
                     Log.i("KDE/LanLink", "Using port $tcpPort")
                     return candidateServer
                 } catch (e: IOException) {
